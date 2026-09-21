@@ -1,0 +1,24 @@
+[project]
+name = "matbench-py"
+version = "0.1.0"
+description = "Benchmarks for matrix multiplication and linear algebra on NumPy and CuPy"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# Install the CuPy wheel matching your CUDA toolkit, e.g.:
+#   uv sync --extra cuda12
+cuda11 = ["cupy-cuda11x"]
+cuda12 = ["cupy-cuda12x"]
+cuda13 = ["cupy-cuda13x"]
+
+[tool.uv]
+# CuPy wheels are large; do not pull one in by default.
+default-groups = []
+
+[dependency-groups]
+dev = []
