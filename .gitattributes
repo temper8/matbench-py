@@ -1,0 +1,37 @@
+# Normalize line endings across platforms.
+# Checkout with native line endings, always store LF in the repository.
+* text=auto eol=lf
+
+# Explicit source/doc types (LF in repo and working tree).
+*.py      text eol=lf
+*.pyi     text eol=lf
+*.toml    text eol=lf
+*.md      text eol=lf
+*.txt     text eol=lf
+*.cfg     text eol=lf
+*.ini     text eol=lf
+*.json    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+
+# Lockfiles: keep diffable as text.
+uv.lock   text eol=lf
+
+# Windows-only scripts keep CRLF.
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+
+# Binary files - never touch.
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.pdf     binary
+*.npy     binary
+*.npz     binary
+*.so      binary
+*.pyd     binary
+*.dll     binary
+*.exe     binary
