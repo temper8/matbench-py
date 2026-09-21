@@ -68,8 +68,10 @@ uv run linalg.py
 uv run linalg.py --size 1024 --ops solve,svd,eig
 ```
 
-GPU FP64 capability (FP64 units per SM and theoretical peaks):
+CPU/GPU FP64 capability (FP64 units per SM, theoretical peaks, measured
+throughput):
 
 ```bash
 uv run device.py
+uv run device.py --size 4096 --cpu-size 2048
 ```

@@ -1,7 +1,7 @@
-"""Report GPU FP64 capability: FP64 units per SM and theoretical peak.
+"""Report CPU/GPU FP64 capability: FP64 units per SM and FLOP throughput.
 
-CUDA does not expose the number of FP64 ALUs per streaming multiprocessor
-(SM) through any API. Two ways to obtain it:
+For the GPU, CUDA does not expose the number of FP64 ALUs per streaming
+multiprocessor (SM) through any API. Two ways to obtain it:
 
   1. Look it up from the compute capability (this is what the tables below
      do). This is the authoritative source.
@@ -10,16 +10,18 @@ CUDA does not expose the number of FP64 ALUs per streaming multiprocessor
      of the kernels is not running at peak (memory-bound, low occupancy,
      clock throttling), so it can differ from the architectural ratio.
 
-This script reports both.
+For the CPU, FP64 throughput depends on the SIMD width (SSE/AVX/AVX-512)
+and the BLAS backend, not on "FP64 blocks", so it is only measured.
 
 Usage:
     uv run device.py
-    uv run device.py --size 4096 --repeats 3
+    uv run device.py --size 4096 --cpu-size 2048 --repeats 3
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 
 import numpy as np
@@ -57,9 +59,11 @@ FP64_RATIO: dict[tuple[int, int], int] = {
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--size", type=int, default=4096, help="square matrix size")
+    p.add_argument("--size", type=int, default=4096, help="GPU square size")
+    p.add_argument("--cpu-size", type=int, default=2048, help="CPU square size")
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--warmup", type=int, default=1)
+    p.add_argument("--cpu-only", action="store_true", help="skip the GPU part")
     return p.parse_args()
 
 
@@ -77,26 +81,33 @@ def measure(backend, n: int, dtype: str, repeats: int, warmup: int) -> float:
     return gflops(n, seconds)
 
 
-def main() -> None:
-    args = parse_args()
+def report_cpu(cpu, size: int, repeats: int, warmup: int) -> None:
+    print("=== CPU ===")
+    print(f"Processor:     {platform.processor() or platform.machine()}")
+    print(f"Logical cores: {os.cpu_count()}")
 
-    print(f"Host: {platform.processor() or platform.machine()} "
-          f"({platform.system()} {platform.release()})")
+    print(f"\nMeasuring {size}x{size} matmul (repeats={repeats})...")
+    m32 = measure(cpu, size, "float32", repeats, warmup)
+    m64 = measure(cpu, size, "float64", repeats, warmup)
 
-    backends = get_backends(include_cupy=True)
-    gpu = next((b for b in backends if b.name == "cupy"), None)
-    if gpu is None:
-        print("\nNo GPU backend available; cannot determine FP64 units.")
-        print("(FP64 throughput on CPU depends on AVX-512/FMA support, "
-              "not on SM FP64 blocks.)")
-        return
+    print(f"\n{'dtype':>8} {'GFLOP/s':>12} {'TFLOPS':>9}")
+    print("-" * 31)
+    print(f"{'float32':>8} {m32:>12.1f} {m32 / 1000:>9.3f}")
+    print(f"{'float64':>8} {m64:>12.1f} {m64 / 1000:>9.3f}")
+    if m64 > 0:
+        print(f"\nFP32:FP64 throughput ratio: {m32 / m64:.1f}:1")
+    print("(CPU uses NumPy's BLAS backend; FP64 speed depends on SIMD width "
+          "and core count.)")
 
+
+def report_gpu(gpu, size: int, repeats: int, warmup: int) -> None:
     props = gpu.xp.cuda.runtime.getDeviceProperties(0)
     major, minor = props["major"], props["minor"]
     cc = (major, minor)
     sms = props["multiProcessorCount"]
     clock_ghz = props["clockRate"] / 1e6
 
+    print("=== GPU ===")
     print(f"GPU:                {decode(props['name'])}")
     print(f"Compute capability: {major}.{minor}")
     print(f"SMs:                {sms}")
@@ -122,10 +133,9 @@ def main() -> None:
     print(f"FP64 peak:          {fp64_peak:.3f} TFLOPS "
           f"(at {clock_ghz:.3f} GHz)")
 
-    print(f"\nMeasuring {args.size}x{args.size} matmul "
-          f"(repeats={args.repeats})...")
-    m32 = measure(gpu, args.size, "float32", args.repeats, args.warmup)
-    m64 = measure(gpu, args.size, "float64", args.repeats, args.warmup)
+    print(f"\nMeasuring {size}x{size} matmul (repeats={repeats})...")
+    m32 = measure(gpu, size, "float32", repeats, warmup)
+    m64 = measure(gpu, size, "float64", repeats, warmup)
 
     print(f"\n{'dtype':>8} {'measured':>12} {'peak':>10} {'eff.':>8}")
     print("-" * 40)
@@ -136,6 +146,28 @@ def main() -> None:
     print("\nNote: the architectural ratio above is authoritative. The "
           "measured\nratio can look better or worse when a kernel is not "
           "running at peak.")
+
+
+def main() -> None:
+    args = parse_args()
+
+    print(f"Host: {platform.processor() or platform.machine()} "
+          f"({platform.system()} {platform.release()})")
+
+    backends = get_backends(include_cupy=not args.cpu_only)
+    cpu = next((b for b in backends if b.name == "numpy"), None)
+    gpu = next((b for b in backends if b.name == "cupy"), None)
+
+    print()
+    if cpu is not None:
+        report_cpu(cpu, args.cpu_size, args.repeats, args.warmup)
+
+    if gpu is None:
+        print("\nNo GPU backend available; skipping the GPU part.")
+        return
+
+    print()
+    report_gpu(gpu, args.size, args.repeats, args.warmup)
 
 
 if __name__ == "__main__":
