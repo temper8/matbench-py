@@ -67,3 +67,9 @@ Linear algebra ops (`solve`, `inv`, `svd`, `eig`, `qr`, `det`):
 uv run linalg.py
 uv run linalg.py --size 1024 --ops solve,svd,eig
 ```
+
+GPU FP64 capability (FP64 units per SM and theoretical peaks):
+
+```bash
+uv run device.py
+```

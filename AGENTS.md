@@ -43,6 +43,7 @@ Guidance for AI agents working in this repository.
   - `backend.py` - backend selection (NumPy/CuPy) and timing helpers.
   - `matmul.py` - matrix multiplication benchmark.
   - `linalg.py` - linear algebra operations benchmark.
+  - `device.py` - GPU FP64 capability report (FP64 units per SM, peaks).
 - No CI, no test framework, and no packaging overhead unless explicitly asked.
 
 ## Running
