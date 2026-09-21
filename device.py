@@ -81,7 +81,7 @@ def measure(backend, n: int, dtype: str, repeats: int, warmup: int) -> float:
     return gflops(n, seconds)
 
 
-def report_cpu(cpu, size: int, repeats: int, warmup: int) -> None:
+def report_cpu(cpu, size: int, repeats: int, warmup: int) -> dict[str, float]:
     print("=== CPU ===")
     print(f"Processor:     {platform.processor() or platform.machine()}")
     print(f"Logical cores: {os.cpu_count()}")
@@ -98,9 +98,10 @@ def report_cpu(cpu, size: int, repeats: int, warmup: int) -> None:
         print(f"\nFP32:FP64 throughput ratio: {m32 / m64:.1f}:1")
     print("(CPU uses NumPy's BLAS backend; FP64 speed depends on SIMD width "
           "and core count.)")
+    return {"float32": m32, "float64": m64}
 
 
-def report_gpu(gpu, size: int, repeats: int, warmup: int) -> None:
+def report_gpu(gpu, size: int, repeats: int, warmup: int) -> dict[str, float] | None:
     props = gpu.xp.cuda.runtime.getDeviceProperties(0)
     major, minor = props["major"], props["minor"]
     cc = (major, minor)
@@ -119,7 +120,7 @@ def report_gpu(gpu, size: int, repeats: int, warmup: int) -> None:
     if fp32_lanes is None or ratio is None:
         print("\nUnknown compute capability; no FP64 entry in the tables.")
         print("Add it to FP32_LANES_PER_SM / FP64_RATIO in device.py.")
-        return
+        return None
 
     fp64_lanes = fp32_lanes // ratio
     fp32_peak = sms * fp32_lanes * 2 * clock_ghz / 1000  # TFLOPS
@@ -146,6 +147,39 @@ def report_gpu(gpu, size: int, repeats: int, warmup: int) -> None:
     print("\nNote: the architectural ratio above is authoritative. The "
           "measured\nratio can look better or worse when a kernel is not "
           "running at peak.")
+    return {"float32": m32, "float64": m64}
+
+
+def print_summary(
+    cpu: dict[str, float] | None,
+    gpu: dict[str, float] | None,
+) -> None:
+    """Print a side-by-side CPU/GPU table and the GPU:CPU speedup."""
+    if cpu is None and gpu is None:
+        return
+
+    print("=== Summary ===")
+    header = f"{'backend':>8} {'float32 (GF)':>14} {'float64 (GF)':>14}"
+    print(header)
+    print("-" * len(header))
+
+    def row(name: str, res: dict[str, float] | None) -> None:
+        if res is None:
+            print(f"{name:>8} {'n/a':>14} {'n/a':>14}")
+        else:
+            print(f"{name:>8} {res['float32']:>14.1f} "
+                  f"{res['float64']:>14.1f}")
+
+    row("cpu", cpu)
+    row("gpu", gpu)
+
+    if cpu and gpu:
+        print("\nGPU:CPU throughput ratio (speedup):")
+        for dtype in ("float32", "float64"):
+            c, g = cpu[dtype], gpu[dtype]
+            ratio = g / c if c > 0 else float("inf")
+            verdict = "GPU faster" if ratio >= 1 else "CPU faster"
+            print(f"  {dtype:>7}: {ratio:>6.2f}x  ({verdict})")
 
 
 def main() -> None:
@@ -158,16 +192,25 @@ def main() -> None:
     cpu = next((b for b in backends if b.name == "numpy"), None)
     gpu = next((b for b in backends if b.name == "cupy"), None)
 
+    cpu_res = gpu_res = None
+
     print()
     if cpu is not None:
-        report_cpu(cpu, args.cpu_size, args.repeats, args.warmup)
+        cpu_res = report_cpu(cpu, args.cpu_size, args.repeats, args.warmup)
 
     if gpu is None:
         print("\nNo GPU backend available; skipping the GPU part.")
-        return
+    else:
+        print()
+        gpu_res = report_gpu(gpu, args.size, args.repeats, args.warmup)
 
     print()
-    report_gpu(gpu, args.size, args.repeats, args.warmup)
+    print_summary(cpu_res, gpu_res)
+
+    if cpu_res and gpu_res and args.cpu_size != args.size:
+        print(f"\nNote: CPU measured at {args.cpu_size}x{args.cpu_size} and GPU "
+              f"at {args.size}x{args.size}; sizes differ, so the ratio is "
+              "indicative.")
 
 
 if __name__ == "__main__":
