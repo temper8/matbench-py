@@ -36,8 +36,8 @@ LINE_WIDTH = 48
 
 
 def print_section(title: str) -> None:
-    """Print a full-width section header rule."""
-    print(f"=== {title} " + "=" * (LINE_WIDTH - len(title) - 5))
+    """Print a full-width, centered section header rule."""
+    print(f" {title} ".center(LINE_WIDTH, "="))
 
 
 # FP32 FMA lanes per SM, by compute capability (major, minor).
