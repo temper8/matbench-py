@@ -73,5 +73,5 @@ throughput):
 
 ```bash
 uv run device.py
-uv run device.py --size 4096 --cpu-size 2048
+uv run device.py --size 4096
 ```
