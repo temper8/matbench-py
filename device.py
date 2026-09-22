@@ -11,18 +11,21 @@ multiprocessor (SM) through any API. Two ways to obtain it:
      clock throttling), so it can differ from the architectural ratio.
 
 For the CPU, FP64 throughput depends on the SIMD width (SSE/AVX/AVX-512)
-and the BLAS backend, not on "FP64 blocks", so it is only measured.
+and the BLAS backend, not on "FP64 blocks", so the peak is estimated from
+the detected core count, SIMD width and clock (overridable via flags).
 
 Usage:
     uv run device.py
-    uv run device.py --size 4096 --cpu-size 2048 --repeats 3
+    uv run device.py --size 4096 --repeats 3
 """
 
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import platform
+import sys
 
 import numpy as np
 
@@ -56,15 +59,156 @@ FP64_RATIO: dict[tuple[int, int], int] = {
     (12, 0): 64,
 }
 
+# FP32 FMA lanes per cycle for one x86 core, by SIMD level.
+SIMD_LANES: dict[str, int] = {
+    "sse": 4,
+    "avx": 8,
+    "avx2": 8,
+    "avx512": 16,
+}
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--size", type=int, default=4096, help="GPU square size")
-    p.add_argument("--cpu-size", type=int, default=2048, help="CPU square size")
+    p.add_argument("--size", type=int, default=4096, help="square matrix size")
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--warmup", type=int, default=1)
     p.add_argument("--cpu-only", action="store_true", help="skip the GPU part")
+    p.add_argument("--cpu-cores", type=int, default=None,
+                   help="physical cores for the CPU peak estimate (auto)")
+    p.add_argument("--cpu-ghz", type=float, default=None,
+                   help="CPU clock in GHz for the peak estimate (auto)")
+    p.add_argument("--cpu-simd", choices=sorted(SIMD_LANES), default=None,
+                   help="CPU SIMD level for the peak estimate (auto)")
     return p.parse_args()
+
+
+def _windows_physical_cores() -> int | None:
+    """Physical core count via GetLogicalProcessorInformation (Windows)."""
+
+    class _Info(ctypes.Structure):
+        _fields_ = [
+            ("ProcessorMask", ctypes.c_size_t),
+            ("Relationship", ctypes.c_int),
+            ("_pad", ctypes.c_int),
+            ("_data", ctypes.c_byte * 16),
+        ]
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+        size = ctypes.c_ulong(0)
+        kernel32.GetLogicalProcessorInformation(None, ctypes.byref(size))
+        count = size.value // ctypes.sizeof(_Info)
+        if count <= 0:
+            return None
+        info = (_Info * count)()
+        if not kernel32.GetLogicalProcessorInformation(info, ctypes.byref(size)):
+            return None
+        return sum(1 for i in range(count) if info[i].Relationship == 0)
+    except Exception:
+        return None
+
+
+def detect_cores() -> tuple[int, str]:
+    """Best-effort physical core count; returns ``(count, source)``."""
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="ignore") as f:
+            pairs: set[tuple[str, str]] = set()
+            phys = core = None
+            for line in f:
+                if line.startswith("physical id"):
+                    phys = line.split(":", 1)[1].strip()
+                elif line.startswith("core id"):
+                    core = line.split(":", 1)[1].strip()
+                elif not line.strip():
+                    if phys is not None and core is not None:
+                        pairs.add((phys, core))
+                    phys = core = None
+            if pairs:
+                return len(pairs), "physical"
+    except OSError:
+        pass
+
+    if sys.platform == "win32":
+        n = _windows_physical_cores()
+        if n:
+            return n, "physical"
+
+    return os.cpu_count() or 1, "logical"
+
+
+def detect_simd() -> str | None:
+    """Best-effort SIMD level: ``sse``/``avx``/``avx2``/``avx512``."""
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="ignore") as f:
+            flags = f.read()
+        if "avx512f" in flags:
+            return "avx512"
+        if "avx2" in flags:
+            return "avx2"
+        if "avx" in flags:
+            return "avx"
+        if "sse2" in flags:
+            return "sse"
+    except OSError:
+        pass
+
+    # Windows exposes AVX/AVX2 (but not AVX-512) through this API.
+    if sys.platform == "win32":
+        try:
+            kernel32 = ctypes.windll.kernel32
+            if kernel32.IsProcessorFeaturePresent(40):  # AVX2
+                return "avx2"
+            if kernel32.IsProcessorFeaturePresent(39):  # AVX
+                return "avx"
+        except Exception:
+            pass
+    return None
+
+
+def detect_clock_ghz() -> tuple[float | None, str]:
+    """Best-effort CPU clock; returns ``(GHz, source)``."""
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            path = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as key:
+                mhz, _ = winreg.QueryValueEx(key, "~MHz")
+            if mhz:
+                return mhz / 1000.0, "registry"
+        except OSError:
+            pass
+
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.lower().startswith("cpu mhz"):
+                    return float(line.split(":", 1)[1]) / 1000.0, "procfs"
+    except OSError:
+        pass
+    return None, "unknown"
+
+
+def resolve_cpu_params(args: argparse.Namespace) -> dict[str, object]:
+    """Resolve CPU peak parameters, honouring CLI overrides."""
+    cores, cores_src = detect_cores()
+    if args.cpu_cores:
+        cores, cores_src = args.cpu_cores, "override"
+
+    simd = args.cpu_simd or detect_simd()
+
+    clock, clock_src = detect_clock_ghz()
+    if args.cpu_ghz:
+        clock, clock_src = args.cpu_ghz, "override"
+
+    return {
+        "cores": cores,
+        "cores_src": cores_src,
+        "simd": simd,
+        "clock": clock,
+        "clock_src": clock_src,
+    }
 
 
 def decode(value: object) -> str:
@@ -81,7 +225,13 @@ def measure(backend, n: int, dtype: str, repeats: int, warmup: int) -> float:
     return gflops(n, seconds)
 
 
-def report_cpu(cpu, size: int, repeats: int, warmup: int) -> dict[str, float]:
+def report_cpu(
+    cpu,
+    size: int,
+    repeats: int,
+    warmup: int,
+    params: dict[str, object],
+) -> dict[str, float]:
     print("=== CPU ===")
     print(f"Processor:     {platform.processor() or platform.machine()}")
     print(f"Logical cores: {os.cpu_count()}")
@@ -90,14 +240,43 @@ def report_cpu(cpu, size: int, repeats: int, warmup: int) -> dict[str, float]:
     m32 = measure(cpu, size, "float32", repeats, warmup)
     m64 = measure(cpu, size, "float64", repeats, warmup)
 
-    print(f"\n{'dtype':>8} {'GFLOP/s':>12} {'TFLOPS':>9}")
-    print("-" * 31)
-    print(f"{'float32':>8} {m32:>12.1f} {m32 / 1000:>9.3f}")
-    print(f"{'float64':>8} {m64:>12.1f} {m64 / 1000:>9.3f}")
+    cores = params["cores"]
+    simd = params["simd"]
+    clock = params["clock"]
+    lanes = SIMD_LANES.get(simd) if simd else None
+
+    if lanes and clock:
+        theor32 = cores * lanes * 2 * clock / 1000  # TFLOPS
+        theor64 = theor32 / 2  # x86 FP32:FP64 lane ratio is 2:1
+    else:
+        theor32 = theor64 = None
+
+    print(f"\n{'dtype':>8} {'measured':>12} {'theor':>10} {'eff.':>8}")
+    print("-" * 40)
+
+    def row(dtype: str, measured: float, theor: float | None) -> None:
+        if theor:
+            print(f"{dtype:>8} {measured:>9.1f} GF {theor * 1000:>7.0f} GF "
+                  f"{measured / (theor * 1000) * 100:>7.1f}%")
+        else:
+            print(f"{dtype:>8} {measured:>9.1f} GF {'n/a':>10} {'n/a':>8}")
+
+    row("float32", m32, theor32)
+    row("float64", m64, theor64)
+
     if m64 > 0:
         print(f"\nFP32:FP64 throughput ratio: {m32 / m64:.1f}:1")
-    print("(CPU uses NumPy's BLAS backend; FP64 speed depends on SIMD width "
-          "and core count.)")
+    print("Note: theor = cores x SIMD lanes x 2 (FMA) x clock; FP64 assumes "
+          "a 2:1 FP32:FP64 lane ratio. The clock is the nominal (non-boost) "
+          "value, and some cores (e.g. AMD Zen) issue more than one FMA per "
+          "lane, so eff. can exceed 100%.")
+
+    simd_txt = (f"{simd} ({lanes} FP32 lanes)"
+                if simd and lanes else "unknown")
+    clock_txt = (f"{clock:.3f} GHz ({params['clock_src']})"
+                 if clock else "unknown")
+    print(f"CPU params: cores={cores} ({params['cores_src']}), "
+          f"SIMD={simd_txt}, clock={clock_txt}")
     return {"float32": m32, "float64": m64}
 
 
@@ -130,15 +309,15 @@ def report_gpu(gpu, size: int, repeats: int, warmup: int) -> dict[str, float] | 
     print(f"FP64:FP32 ratio:    1:{ratio}")
     print(f"FP64 lanes/SM:      {fp64_lanes}")
     print(f"Total FP64 lanes:   {sms * fp64_lanes}")
-    print(f"FP32 peak:          {fp32_peak:.3f} TFLOPS")
-    print(f"FP64 peak:          {fp64_peak:.3f} TFLOPS "
+    print(f"FP32 theor:         {fp32_peak:.3f} TFLOPS")
+    print(f"FP64 theor:         {fp64_peak:.3f} TFLOPS "
           f"(at {clock_ghz:.3f} GHz)")
 
     print(f"\nMeasuring {size}x{size} matmul (repeats={repeats})...")
     m32 = measure(gpu, size, "float32", repeats, warmup)
     m64 = measure(gpu, size, "float64", repeats, warmup)
 
-    print(f"\n{'dtype':>8} {'measured':>12} {'peak':>10} {'eff.':>8}")
+    print(f"\n{'dtype':>8} {'measured':>12} {'theor':>10} {'eff.':>8}")
     print("-" * 40)
     print(f"{'float32':>8} {m32:>9.1f} GF {fp32_peak * 1000:>7.0f} GF "
           f"{m32 / (fp32_peak * 1000) * 100:>7.1f}%")
@@ -159,7 +338,7 @@ def print_summary(
         return
 
     print("=== Summary ===")
-    header = f"{'backend':>8} {'float32 (GF)':>14} {'float64 (GF)':>14}"
+    header = f"{'backend':>8} {'float32':>14} {'float64':>14}"
     print(header)
     print("-" * len(header))
 
@@ -167,8 +346,8 @@ def print_summary(
         if res is None:
             print(f"{name:>8} {'n/a':>14} {'n/a':>14}")
         else:
-            print(f"{name:>8} {res['float32']:>14.1f} "
-                  f"{res['float64']:>14.1f}")
+            print(f"{name:>8} {res['float32']:>11.1f} GF "
+                  f"{res['float64']:>11.1f} GF")
 
     row("cpu", cpu)
     row("gpu", gpu)
@@ -196,7 +375,9 @@ def main() -> None:
 
     print()
     if cpu is not None:
-        cpu_res = report_cpu(cpu, args.cpu_size, args.repeats, args.warmup)
+        params = resolve_cpu_params(args)
+        cpu_res = report_cpu(
+            cpu, args.size, args.repeats, args.warmup, params)
 
     if gpu is None:
         print("\nNo GPU backend available; skipping the GPU part.")
@@ -206,11 +387,6 @@ def main() -> None:
 
     print()
     print_summary(cpu_res, gpu_res)
-
-    if cpu_res and gpu_res and args.cpu_size != args.size:
-        print(f"\nNote: CPU measured at {args.cpu_size}x{args.cpu_size} and GPU "
-              f"at {args.size}x{args.size}; sizes differ, so the ratio is "
-              "indicative.")
 
 
 if __name__ == "__main__":
