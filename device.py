@@ -353,7 +353,7 @@ def print_summary(
     row("gpu", gpu)
 
     if cpu and gpu:
-        print("\nGPU:CPU throughput ratio (speedup):")
+        print("\nGPU:CPU Speedup:")
         for dtype in ("float32", "float64"):
             c, g = cpu[dtype], gpu[dtype]
             ratio = g / c if c > 0 else float("inf")
