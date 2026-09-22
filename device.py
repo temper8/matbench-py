@@ -31,6 +31,15 @@ import numpy as np
 
 from backend import get_backends, gflops, timeit
 
+# Width of report section headers and table separators.
+LINE_WIDTH = 48
+
+
+def print_section(title: str) -> None:
+    """Print a full-width section header rule."""
+    print(f"=== {title} " + "=" * (LINE_WIDTH - len(title) - 5))
+
+
 # FP32 FMA lanes per SM, by compute capability (major, minor).
 FP32_LANES_PER_SM: dict[tuple[int, int], int] = {
     (7, 0): 64,   # Volta (V100, Titan V)
@@ -232,7 +241,7 @@ def report_cpu(
     warmup: int,
     params: dict[str, object],
 ) -> dict[str, float]:
-    print("=== CPU ===")
+    print_section("CPU")
     print(f"Processor:     {platform.processor() or platform.machine()}")
     print(f"Logical cores: {os.cpu_count()}")
 
@@ -251,15 +260,15 @@ def report_cpu(
     else:
         theor32 = theor64 = None
 
-    print(f"\n{'dtype':>8} {'measured':>12} {'theor':>10} {'eff.':>8}")
-    print("-" * 40)
+    print(f"\n{'dtype':>8} {'measured':>15} {'theor':>13} {'eff.':>9}")
+    print("-" * LINE_WIDTH)
 
     def row(dtype: str, measured: float, theor: float | None) -> None:
         if theor:
-            print(f"{dtype:>8} {measured:>9.1f} GF {theor * 1000:>7.0f} GF "
-                  f"{measured / (theor * 1000) * 100:>7.1f}%")
+            print(f"{dtype:>8} {measured:>12.1f} GF {theor * 1000:>10.0f} GF "
+                  f"{measured / (theor * 1000) * 100:>8.1f}%")
         else:
-            print(f"{dtype:>8} {measured:>9.1f} GF {'n/a':>10} {'n/a':>8}")
+            print(f"{dtype:>8} {measured:>12.1f} GF {'n/a':>13} {'n/a':>9}")
 
     row("float32", m32, theor32)
     row("float64", m64, theor64)
@@ -287,7 +296,7 @@ def report_gpu(gpu, size: int, repeats: int, warmup: int) -> dict[str, float] | 
     sms = props["multiProcessorCount"]
     clock_ghz = props["clockRate"] / 1e6
 
-    print("=== GPU ===")
+    print_section("GPU")
     print(f"GPU:                {decode(props['name'])}")
     print(f"Compute capability: {major}.{minor}")
     print(f"SMs:                {sms}")
@@ -317,12 +326,12 @@ def report_gpu(gpu, size: int, repeats: int, warmup: int) -> dict[str, float] | 
     m32 = measure(gpu, size, "float32", repeats, warmup)
     m64 = measure(gpu, size, "float64", repeats, warmup)
 
-    print(f"\n{'dtype':>8} {'measured':>12} {'theor':>10} {'eff.':>8}")
-    print("-" * 40)
-    print(f"{'float32':>8} {m32:>9.1f} GF {fp32_peak * 1000:>7.0f} GF "
-          f"{m32 / (fp32_peak * 1000) * 100:>7.1f}%")
-    print(f"{'float64':>8} {m64:>9.1f} GF {fp64_peak * 1000:>7.0f} GF "
-          f"{m64 / (fp64_peak * 1000) * 100:>7.1f}%")
+    print(f"\n{'dtype':>8} {'measured':>15} {'theor':>13} {'eff.':>9}")
+    print("-" * LINE_WIDTH)
+    print(f"{'float32':>8} {m32:>12.1f} GF {fp32_peak * 1000:>10.0f} GF "
+          f"{m32 / (fp32_peak * 1000) * 100:>8.1f}%")
+    print(f"{'float64':>8} {m64:>12.1f} GF {fp64_peak * 1000:>10.0f} GF "
+          f"{m64 / (fp64_peak * 1000) * 100:>8.1f}%")
     print("\nNote: the architectural ratio above is authoritative. The "
           "measured\nratio can look better or worse when a kernel is not "
           "running at peak.")
@@ -337,17 +346,17 @@ def print_summary(
     if cpu is None and gpu is None:
         return
 
-    print("=== Summary ===")
-    header = f"{'backend':>8} {'float32':>14} {'float64':>14}"
+    print_section("Summary")
+    header = f"{'backend':>8} {'float32':>19} {'float64':>19}"
     print(header)
     print("-" * len(header))
 
     def row(name: str, res: dict[str, float] | None) -> None:
         if res is None:
-            print(f"{name:>8} {'n/a':>14} {'n/a':>14}")
+            print(f"{name:>8} {'n/a':>19} {'n/a':>19}")
         else:
-            print(f"{name:>8} {res['float32']:>11.1f} GF "
-                  f"{res['float64']:>11.1f} GF")
+            print(f"{name:>8} {res['float32']:>16.1f} GF "
+                  f"{res['float64']:>16.1f} GF")
 
     row("cpu", cpu)
     row("gpu", gpu)
